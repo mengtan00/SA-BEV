@@ -23,6 +23,7 @@
 | [**BEVDet-R50**](configs/bevdet/bevdet-r50.py)       | 27.8     | 32.2    | 18.7    | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing)   | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) 
 | [**BEVDet-R50-CBGS**](configs/bevdet/bevdet-r50-cbgs.py)       | 30.7     | 38.2    | 18.7   | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing)   | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) 
 | [**BEVDet-R50-4D-Depth-CBGS**](configs/bevdet/bevdet4d-r50-depth-cbgs.py)       | 40.2/40.6#     | 52.3/52.6#    | 16.4  | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing)   | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) 
+
 \# align previous frame bev feature during the view transformation. 
 ## Inference speed with different backends
 
