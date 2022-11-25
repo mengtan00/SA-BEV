@@ -1,78 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
-from mmcv.runner import BaseModule
+import torch.nn.functional as F
+from mmcv.cnn import build_conv_layer
+from mmcv.runner import BaseModule, force_fp32
+from torch.cuda.amp.autocast_mode import autocast
+from torch.utils.checkpoint import checkpoint
 
+from mmdet3d.ops.bev_pool_v2.bev_pool import bev_pool_v2
+from mmdet.models.backbones.resnet import BasicBlock
 from ..builder import NECKS
-
-
-class QuickCumsum(torch.autograd.Function):
-    """Sum up the features of all points within the same voxel through
-    cumulative sum operator."""
-
-    @staticmethod
-    def forward(ctx, x, coor, ranks):
-        """Forward function.
-
-        All inputs should be sorted by the rank of voxels.
-
-        The function implementation process is as follows:
-
-            - step 1: Cumulatively sum the point-wise feature alone the point
-                queue.
-            - step 2: Remove the duplicated points with the same voxel rank and
-                only retain the last one in the point queue.
-            - step 3: Subtract each point feature with the previous one to
-                obtain the cumulative sum of the points in the same voxel.
-
-        Args:
-            x (torch.tensor): Point-wise features in shape (N_Points, C).
-            coor (torch.tensor): The coordinate of points in the feature
-                coordinate system in shape (N_Points, D).
-            ranks (torch.tensor): The rank of voxel that a point is belong to.
-                The shape should be (N_Points).
-
-        Returns:
-            tuple[torch.tensor]: Voxel-wise features in shape (N_Voxels, C);
-                The coordinate of voxels in the feature coordinate system in
-                shape (N_Voxels,3).
-        """
-        x = x.cumsum(0)
-        kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool)
-        kept[:-1] = (ranks[1:] != ranks[:-1])
-
-        x, coor = x[kept], coor[kept]
-        x = torch.cat((x[:1], x[1:] - x[:-1]))
-
-        # save kept for backward
-        ctx.save_for_backward(kept)
-
-        # no gradient for coordinates
-        ctx.mark_non_differentiable(coor)
-
-        return x, coor
-
-    @staticmethod
-    def backward(ctx, gradx, gradcoor):
-        """Backward propagation function.
-
-        Args:
-            gradx (torch.tensor): Gradient of the output parameter 'x' in the
-                forword function.
-            gradcoor (torch.tensor): Gradient of the output parameter 'coor' in
-                the forword function.
-
-        Returns:
-            torch.tensor: Gradient of the input parameter 'x' in the forword
-                function.
-        """
-        kept, = ctx.saved_tensors
-        back = torch.cumsum(kept, 0)
-        back[kept] -= 1
-
-        val = gradx[back]
-
-        return val, None, None
 
 
 @NECKS.register_module()
@@ -93,26 +30,27 @@ class LSSViewTransformer(BaseModule):
         accelerate (bool): Whether the view transformation is conducted with
             acceleration. Note: the intrinsic and extrinsic of cameras should
             be constant when 'accelerate' is set true.
-        max_voxel_points (int): Specify the maximum point number in a single
-            voxel during the acceleration.
     """
 
-    def __init__(self,
-                 grid_config,
-                 input_size,
-                 downsample,
-                 in_channels,
-                 out_channels,
-                 accelerate=False,
-                 max_voxel_points=300):
+    def __init__(
+        self,
+        grid_config,
+        input_size,
+        downsample=16,
+        in_channels=512,
+        out_channels=64,
+        accelerate=False,
+    ):
         super(LSSViewTransformer, self).__init__()
+        self.grid_config = grid_config
+        self.downsample = downsample
         self.create_grid_infos(**grid_config)
         self.create_frustum(grid_config['depth'], input_size, downsample)
         self.out_channels = out_channels
+        self.in_channels = in_channels
         self.depth_net = nn.Conv2d(
             in_channels, self.D + self.out_channels, kernel_size=1, padding=0)
         self.accelerate = accelerate
-        self.max_voxel_points = max_voxel_points
         self.initial_flag = True
 
     def create_grid_infos(self, x, y, z, **kwargs):
@@ -157,7 +95,8 @@ class LSSViewTransformer(BaseModule):
         # D x H x W x 3
         self.frustum = torch.stack((x, y, d), -1)
 
-    def get_lidar_coor(self, rots, trans, cam2imgs, post_rots, post_trans):
+    def get_lidar_coor(self, rots, trans, cam2imgs, post_rots, post_trans,
+                       bda):
         """Calculate the locations of the frustum points in the lidar
         coordinate system.
 
@@ -192,81 +131,11 @@ class LSSViewTransformer(BaseModule):
         combine = rots.matmul(torch.inverse(cam2imgs))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)
-
+        points = bda.view(B, 1, 1, 1, 1, 3,
+                          3).matmul(points.unsqueeze(-1)).squeeze(-1)
         return points
 
-    def voxel_pooling_prepare(self, coor, x):
-        """Data preparation for voxel pooling.
-
-        Args:
-            coor (torch.tensor): Coordinate of points in the lidar space in
-                shape (B, N, D, H, W, 3).
-            x (torch.tensor): Feature of points in shape
-                (B, N_cams, D, H, W, C).
-
-        Returns:
-            tuple[torch.tensor]: Feature of points in shape (N_Points, C);
-                Coordinate of points in the voxel space in shape (N_Points, 3);
-                Rank of the voxel that a point is belong to in shape
-                (N_Points); Reserved index of points in the input point queue
-                in shape (N_Points).
-        """
-        B, N, D, H, W, C = x.shape
-        num_points = B * N * D * H * W
-        # flatten x
-        x = x.reshape(num_points, C)
-        # record the index of selected points for acceleration purpose
-        point_idx = torch.range(0, num_points - 1, dtype=torch.long)
-        # convert coordinate into the voxel space
-        coor = ((coor - self.grid_lower_bound.to(coor)) /
-                self.grid_interval.to(coor))
-        coor = coor.long().view(num_points, 3)
-        batch_idx = torch.range(0, B-1).reshape(B, 1).\
-            expand(B, num_points // B).view(num_points, 1).to(coor)
-        coor = torch.cat((coor, batch_idx), 1)
-
-        # filter out points that are outside box
-        kept = (coor[:, 0] >= 0) & (coor[:, 0] < self.grid_size[0]) & \
-               (coor[:, 1] >= 0) & (coor[:, 1] < self.grid_size[1]) & \
-               (coor[:, 2] >= 0) & (coor[:, 2] < self.grid_size[2])
-        x, coor, point_idx = x[kept], coor[kept], point_idx[kept]
-
-        # get tensors from the same voxel next to each other
-        ranks = coor[:, 0] * (self.grid_size[1] * self.grid_size[2] * B)
-        ranks += coor[:, 1] * (self.grid_size[2] * B)
-        ranks += coor[:, 2] * B + coor[:, 3]
-        order = ranks.argsort()
-        return x[order], coor[order], ranks[order], point_idx[order]
-
-    def voxel_pooling(self, coor, x):
-        """Generate bird-eye-view features with the pseudo point cloud.
-
-        Args:
-            coor (torch.tensor): Coordinate of points in the lidar space in
-                shape (B, N_cams, D, H, W, 3).
-            x (torch.tensor): Feature of points in shape
-                (B, N_cams, D, H, W, C).
-
-        Returns:
-            torch.tensor: Bird-eye-view features in shape (B, C, H_BEV, W_BEV).
-        """
-        B, _, _, _, _, C = x.shape
-        x, coor, ranks, _ = self.voxel_pooling_prepare(coor, x)
-
-        # cumsum trick
-        x, coor = QuickCumsum.apply(x, coor, ranks)
-
-        # griddify (B x C x Z x X x Y)
-        grid_size = self.grid_size.to(torch.long)
-        final = torch.zeros((B, C, grid_size[2], grid_size[1], grid_size[0]),
-                            device=x.device)
-        final[coor[:, 3], :, coor[:, 2], coor[:, 1], coor[:, 0]] = x
-        # collapse Z
-        final = torch.cat(final.unbind(dim=2), 1)
-
-        return final
-
-    def init_acceleration(self, coor, x):
+    def init_acceleration_v2(self, coor):
         """Pre-compute the necessary information in acceleration including the
         index of points in the final feature.
 
@@ -276,58 +145,137 @@ class LSSViewTransformer(BaseModule):
             x (torch.tensor): Feature of points in shape
                 (B, N_cams, D, H, W, C).
         """
-        x, coor, ranks, point_idx = self.voxel_pooling_prepare(coor, x)
-        # count for the repeat times of the same voxel rank in the point queue.
-        repeat_times = torch.ones(
-            coor.shape[0], device=coor.device, dtype=coor.dtype)
-        times = 0
-        repeat_times[0] = 0
-        cur_rank = ranks[0]
 
-        for i in range(1, ranks.shape[0]):
-            if cur_rank == ranks[i]:
-                times += 1
-                repeat_times[i] = times
-            else:
-                cur_rank = ranks[i]
-                times = 0
-                repeat_times[i] = times
-        # remove the point whose repeat time is exceed the threshold.
-        kept = repeat_times < self.max_voxel_points
-        repeat_times, coor = repeat_times[kept], coor[kept]
-        x, point_idx = x[kept], point_idx[kept]
+        ranks_bev, ranks_depth, ranks_feat, \
+            interval_starts, interval_lengths = \
+            self.voxel_pooling_prepare_v2(coor)
 
-        coor = torch.cat([coor, repeat_times.unsqueeze(-1)], dim=-1)
-        self.coor = coor
-        self.point_idx = point_idx
-        self.initial_flag = False
+        self.ranks_bev = ranks_bev.int().contiguous()
+        self.ranks_feat = ranks_feat.int().contiguous()
+        self.ranks_depth = ranks_depth.int().contiguous()
+        self.interval_starts = interval_starts.int().contiguous()
+        self.interval_lengths = interval_lengths.int().contiguous()
 
-    def voxel_pooling_accelerated(self, x):
-        """Conducting voxel pooling in accelerated mode.
+    def voxel_pooling_v2(self, coor, depth, feat):
+        ranks_bev, ranks_depth, ranks_feat, \
+            interval_starts, interval_lengths = \
+            self.voxel_pooling_prepare_v2(coor)
+        if ranks_feat is None:
+            print('warning ---> no points within the predefined '
+                  'bev receptive field')
+            dummy = torch.zeros(size=[
+                feat.shape[0], feat.shape[2],
+                int(self.grid_size[2]),
+                int(self.grid_size[0]),
+                int(self.grid_size[1])
+            ]).to(feat)
+            dummy = torch.cat(dummy.unbind(dim=2), 1)
+            return dummy
+        feat = feat.permute(0, 1, 3, 4, 2)
+        bev_feat_shape = (depth.shape[0], int(self.grid_size[2]),
+                          int(self.grid_size[1]), int(self.grid_size[0]),
+                          feat.shape[-1])  # (B, Z, Y, X, C)
+        bev_feat = bev_pool_v2(depth, feat, ranks_depth, ranks_feat, ranks_bev,
+                               bev_feat_shape, interval_starts,
+                               interval_lengths)
+        # collapse Z
+        bev_feat = torch.cat(bev_feat.unbind(dim=2), 1)
+        return bev_feat
+
+    def voxel_pooling_prepare_v2(self, coor):
+        """Data preparation for voxel pooling.
 
         Args:
-            x (torch.tensor): The feature of the volumes in shape
-                (B, N_cams, D, H, W, C).
+            coor (torch.tensor): Coordinate of points in the lidar space in
+                shape (B, N, D, H, W, 3).
 
         Returns:
-            torch.tensor: Bird-eye-view features in shape (B, C, H_BEV, W_BEV).
+            tuple[torch.tensor]: Rank of the voxel that a point is belong to
+                in shape (N_Points); Reserved index of points in the depth
+                space in shape (N_Points). Reserved index of points in the
+                feature space in shape (N_Points).
         """
-        B, N, D, H, W, C = x.shape
-        Nprime = B * N * D * H * W
-        # flatten x
-        x = x.reshape(Nprime, C)[self.point_idx]
+        B, N, D, H, W, _ = coor.shape
+        num_points = B * N * D * H * W
+        # record the index of selected points for acceleration purpose
+        ranks_depth = torch.range(
+            0, num_points - 1, dtype=torch.int, device=coor.device)
+        ranks_feat = torch.range(
+            0, num_points // D - 1, dtype=torch.int, device=coor.device)
+        ranks_feat = ranks_feat.reshape(B, N, 1, H, W)
+        ranks_feat = ranks_feat.expand(B, N, D, H, W).flatten()
+        # convert coordinate into the voxel space
+        coor = ((coor - self.grid_lower_bound.to(coor)) /
+                self.grid_interval.to(coor))
+        coor = coor.long().view(num_points, 3)
+        batch_idx = torch.range(0, B - 1).reshape(B, 1). \
+            expand(B, num_points // B).reshape(num_points, 1).to(coor)
+        coor = torch.cat((coor, batch_idx), 1)
 
-        # griddify (B x C x Z x X x Y)
-        gs = self.grid_size.to(torch.long)
-        final = torch.zeros((B, C, gs[2], gs[1], gs[0], self.max_voxel_points),
-                            device=x.device)
-        c = self.coor
-        final[c[:, 3], :, c[:, 2], c[:, 1], c[:, 0], c[:, 4]] = x
-        final = final.sum(-1)
+        # filter out points that are outside box
+        kept = (coor[:, 0] >= 0) & (coor[:, 0] < self.grid_size[0]) & \
+               (coor[:, 1] >= 0) & (coor[:, 1] < self.grid_size[1]) & \
+               (coor[:, 2] >= 0) & (coor[:, 2] < self.grid_size[2])
+        if len(kept) == 0:
+            return None, None, None, None, None
+        coor, ranks_depth, ranks_feat = \
+            coor[kept], ranks_depth[kept], ranks_feat[kept]
+        # get tensors from the same voxel next to each other
+        ranks_bev = coor[:, 3] * (
+            self.grid_size[2] * self.grid_size[1] * self.grid_size[0])
+        ranks_bev += coor[:, 2] * (self.grid_size[1] * self.grid_size[0])
+        ranks_bev += coor[:, 1] * self.grid_size[0] + coor[:, 0]
+        order = ranks_bev.argsort()
+        ranks_bev, ranks_depth, ranks_feat = \
+            ranks_bev[order], ranks_depth[order], ranks_feat[order]
 
-        # collapse Z
-        final = torch.cat(final.unbind(dim=2), 1)
-        return final
+        kept = torch.ones(
+            ranks_bev.shape[0], device=ranks_bev.device, dtype=torch.bool)
+        kept[1:] = ranks_bev[1:] != ranks_bev[:-1]
+        interval_starts = torch.where(kept)[0].int()
+        if len(interval_starts) == 0:
+            return None, None, None, None, None
+        interval_lengths = torch.zeros_like(interval_starts)
+        interval_lengths[:-1] = interval_starts[1:] - interval_starts[:-1]
+        interval_lengths[-1] = ranks_bev.shape[0] - interval_starts[-1]
+        return ranks_bev.int().contiguous(), ranks_depth.int().contiguous(
+        ), ranks_feat.int().contiguous(), interval_starts.int().contiguous(
+        ), interval_lengths.int().contiguous()
+
+    def pre_compute(self, input):
+        if self.initial_flag:
+            coor = self.get_lidar_coor(*input[1:7])
+            self.init_acceleration_v2(coor)
+            self.initial_flag = False
+
+    def view_transform_core(self, input, depth, tran_feat):
+        B, N, C, H, W = input[0].shape
+
+        # Lift-Splat
+        if self.accelerate:
+            feat = tran_feat.view(B, N, self.out_channels, H, W)
+            feat = feat.permute(0, 1, 3, 4, 2)
+            depth = depth.view(B, N, self.D, H, W)
+            bev_feat_shape = (depth.shape[0], int(self.grid_size[2]),
+                              int(self.grid_size[1]), int(self.grid_size[0]),
+                              feat.shape[-1])  # (B, Z, Y, X, C)
+            bev_feat = bev_pool_v2(depth, feat, self.ranks_depth,
+                                   self.ranks_feat, self.ranks_bev,
+                                   bev_feat_shape, self.interval_starts,
+                                   self.interval_lengths)
+
+            bev_feat = bev_feat.squeeze(2)
+        else:
+            coor = self.get_lidar_coor(*input[1:7])
+            bev_feat = self.voxel_pooling_v2(
+                coor, depth.view(B, N, self.D, H, W),
+                tran_feat.view(B, N, self.out_channels, H, W))
+        return bev_feat, depth
+
+    def view_transform(self, input, depth, tran_feat):
+        if self.accelerate:
+            self.pre_compute(input)
+        return self.view_transform_core(input, depth, tran_feat)
 
     def forward(self, input):
         """Transform image-view feature into bird-eye-view feature.
@@ -343,21 +291,379 @@ class LSSViewTransformer(BaseModule):
         B, N, C, H, W = x.shape
         x = x.view(B * N, C, H, W)
         x = self.depth_net(x)
-        depth = x[:, :self.D].softmax(dim=1)
-        tran_feat = x[:, self.D:(self.D + self.out_channels)]
 
-        # Lift
-        volume = depth.unsqueeze(1) * tran_feat.unsqueeze(2)
-        volume = volume.view(B, N, self.out_channels, self.D, H, W)
-        volume = volume.permute(0, 1, 3, 4, 5, 2)
+        depth_digit = x[:, :self.D, ...]
+        tran_feat = x[:, self.D:self.D + self.out_channels, ...]
+        depth = depth_digit.softmax(dim=1)
+        return self.view_transform(input, depth, tran_feat)
 
-        # Splat
-        if self.accelerate:
-            if self.initial_flag:
-                coor = self.get_lidar_coor(*input[1:])
-                self.init_acceleration(coor, volume)
-            bev_feat = self.voxel_pooling_accelerated(volume)
-        else:
-            coor = self.get_lidar_coor(*input[1:])
-            bev_feat = self.voxel_pooling(coor, volume)
-        return bev_feat
+    def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
+        return None
+
+
+class _ASPPModule(nn.Module):
+
+    def __init__(self, inplanes, planes, kernel_size, padding, dilation,
+                 BatchNorm):
+        super(_ASPPModule, self).__init__()
+        self.atrous_conv = nn.Conv2d(
+            inplanes,
+            planes,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding,
+            dilation=dilation,
+            bias=False)
+        self.bn = BatchNorm(planes)
+        self.relu = nn.ReLU()
+
+        self._init_weight()
+
+    def forward(self, x):
+        x = self.atrous_conv(x)
+        x = self.bn(x)
+
+        return self.relu(x)
+
+    def _init_weight(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                torch.nn.init.kaiming_normal_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+
+class ASPP(nn.Module):
+
+    def __init__(self, inplanes, mid_channels=256, BatchNorm=nn.BatchNorm2d):
+        super(ASPP, self).__init__()
+
+        dilations = [1, 6, 12, 18]
+
+        self.aspp1 = _ASPPModule(
+            inplanes,
+            mid_channels,
+            1,
+            padding=0,
+            dilation=dilations[0],
+            BatchNorm=BatchNorm)
+        self.aspp2 = _ASPPModule(
+            inplanes,
+            mid_channels,
+            3,
+            padding=dilations[1],
+            dilation=dilations[1],
+            BatchNorm=BatchNorm)
+        self.aspp3 = _ASPPModule(
+            inplanes,
+            mid_channels,
+            3,
+            padding=dilations[2],
+            dilation=dilations[2],
+            BatchNorm=BatchNorm)
+        self.aspp4 = _ASPPModule(
+            inplanes,
+            mid_channels,
+            3,
+            padding=dilations[3],
+            dilation=dilations[3],
+            BatchNorm=BatchNorm)
+
+        self.global_avg_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(inplanes, mid_channels, 1, stride=1, bias=False),
+            BatchNorm(mid_channels),
+            nn.ReLU(),
+        )
+        self.conv1 = nn.Conv2d(
+            int(mid_channels * 5), mid_channels, 1, bias=False)
+        self.bn1 = BatchNorm(mid_channels)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
+        self._init_weight()
+
+    def forward(self, x):
+        x1 = self.aspp1(x)
+        x2 = self.aspp2(x)
+        x3 = self.aspp3(x)
+        x4 = self.aspp4(x)
+        x5 = self.global_avg_pool(x)
+        x5 = F.interpolate(
+            x5, size=x4.size()[2:], mode='bilinear', align_corners=True)
+        x = torch.cat((x1, x2, x3, x4, x5), dim=1)
+
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        return self.dropout(x)
+
+    def _init_weight(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                torch.nn.init.kaiming_normal_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+
+class Mlp(nn.Module):
+
+    def __init__(self,
+                 in_features,
+                 hidden_features=None,
+                 out_features=None,
+                 act_layer=nn.ReLU,
+                 drop=0.0):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop2 = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
+class SELayer(nn.Module):
+
+    def __init__(self, channels, act_layer=nn.ReLU, gate_layer=nn.Sigmoid):
+        super().__init__()
+        self.conv_reduce = nn.Conv2d(channels, channels, 1, bias=True)
+        self.act1 = act_layer()
+        self.conv_expand = nn.Conv2d(channels, channels, 1, bias=True)
+        self.gate = gate_layer()
+
+    def forward(self, x, x_se):
+        x_se = self.conv_reduce(x_se)
+        x_se = self.act1(x_se)
+        x_se = self.conv_expand(x_se)
+        return x * self.gate(x_se)
+
+
+class DepthNet(nn.Module):
+
+    def __init__(self,
+                 in_channels,
+                 mid_channels,
+                 context_channels,
+                 depth_channels,
+                 use_dcn=True,
+                 use_aspp=True):
+        super(DepthNet, self).__init__()
+        self.reduce_conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels, mid_channels, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.context_conv = nn.Conv2d(
+            mid_channels, context_channels, kernel_size=1, stride=1, padding=0)
+        self.bn = nn.BatchNorm1d(27)
+        self.depth_mlp = Mlp(27, mid_channels, mid_channels)
+        self.depth_se = SELayer(mid_channels)  # NOTE: add camera-aware
+        self.context_mlp = Mlp(27, mid_channels, mid_channels)
+        self.context_se = SELayer(mid_channels)  # NOTE: add camera-aware
+        depth_conv_list = [
+            BasicBlock(mid_channels, mid_channels),
+            BasicBlock(mid_channels, mid_channels),
+            BasicBlock(mid_channels, mid_channels),
+        ]
+        if use_aspp:
+            depth_conv_list.append(ASPP(mid_channels, mid_channels))
+        if use_dcn:
+            depth_conv_list.append(
+                build_conv_layer(
+                    cfg=dict(
+                        type='DCN',
+                        in_channels=mid_channels,
+                        out_channels=mid_channels,
+                        kernel_size=3,
+                        padding=1,
+                        groups=4,
+                        im2col_step=128,
+                    )))
+        depth_conv_list.append(
+            nn.Conv2d(
+                mid_channels,
+                depth_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0))
+        self.depth_conv = nn.Sequential(*depth_conv_list)
+
+    def forward(self, x, mlp_input):
+        mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
+        x = self.reduce_conv(x)
+        context_se = self.context_mlp(mlp_input)[..., None, None]
+        context = self.context_se(x, context_se)
+        context = self.context_conv(context)
+        depth_se = self.depth_mlp(mlp_input)[..., None, None]
+        depth = self.depth_se(x, depth_se)
+        depth = self.depth_conv(depth)
+        return torch.cat([depth, context], dim=1)
+
+
+class DepthAggregation(nn.Module):
+    """pixel cloud feature extraction."""
+
+    def __init__(self, in_channels, mid_channels, out_channels):
+        super(DepthAggregation, self).__init__()
+
+        self.reduce_conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                mid_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(
+                mid_channels,
+                mid_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(
+                mid_channels,
+                mid_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        self.out_conv = nn.Sequential(
+            nn.Conv2d(
+                mid_channels,
+                out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=True),
+            # nn.BatchNorm3d(out_channels),
+            # nn.ReLU(inplace=True),
+        )
+
+    @autocast(False)
+    def forward(self, x):
+        x = checkpoint(self.reduce_conv, x)
+        short_cut = x
+        x = checkpoint(self.conv, x)
+        x = short_cut + x
+        x = self.out_conv(x)
+        return x
+
+
+@NECKS.register_module()
+class LSSViewTransformerBEVDepth(LSSViewTransformer):
+
+    def __init__(self, loss_depth_weight=3.0, depthnet_cfg=dict(), **kwargs):
+        super(LSSViewTransformerBEVDepth, self).__init__(**kwargs)
+        self.loss_depth_weight = loss_depth_weight
+        self.depth_net = DepthNet(self.in_channels, self.in_channels,
+                                  self.out_channels, self.D, **depthnet_cfg)
+
+    def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
+        B, N, _, _ = rot.shape
+        bda = bda.view(B, 1, 3, 3).repeat(1, N, 1, 1)
+        mlp_input = torch.stack([
+            intrin[:, :, 0, 0],
+            intrin[:, :, 1, 1],
+            intrin[:, :, 0, 2],
+            intrin[:, :, 1, 2],
+            post_rot[:, :, 0, 0],
+            post_rot[:, :, 0, 1],
+            post_tran[:, :, 0],
+            post_rot[:, :, 1, 0],
+            post_rot[:, :, 1, 1],
+            post_tran[:, :, 1],
+            bda[:, :, 0, 0],
+            bda[:, :, 0, 1],
+            bda[:, :, 1, 0],
+            bda[:, :, 1, 1],
+            bda[:, :, 2, 2],
+        ],
+                                dim=-1)
+        sensor2ego = torch.cat([rot, tran.reshape(B, N, 3, 1)],
+                               dim=-1).reshape(B, N, -1)
+        mlp_input = torch.cat([mlp_input, sensor2ego], dim=-1)
+        return mlp_input
+
+    def get_downsampled_gt_depth(self, gt_depths):
+        """
+        Input:
+            gt_depths: [B, N, H, W]
+        Output:
+            gt_depths: [B*N*h*w, d]
+        """
+        B, N, H, W = gt_depths.shape
+        gt_depths = gt_depths.view(B * N, H // self.downsample,
+                                   self.downsample, W // self.downsample,
+                                   self.downsample, 1)
+        gt_depths = gt_depths.permute(0, 1, 3, 5, 2, 4).contiguous()
+        gt_depths = gt_depths.view(-1, self.downsample * self.downsample)
+        gt_depths_tmp = torch.where(gt_depths == 0.0,
+                                    1e5 * torch.ones_like(gt_depths),
+                                    gt_depths)
+        gt_depths = torch.min(gt_depths_tmp, dim=-1).values
+        gt_depths = gt_depths.view(B * N, H // self.downsample,
+                                   W // self.downsample)
+
+        gt_depths = (
+            gt_depths -
+            (self.grid_config['depth'][0] -
+             self.grid_config['depth'][2])) / self.grid_config['depth'][2]
+        gt_depths = torch.where((gt_depths < self.D + 1) & (gt_depths >= 0.0),
+                                gt_depths, torch.zeros_like(gt_depths))
+        gt_depths = F.one_hot(
+            gt_depths.long(), num_classes=self.D + 1).view(-1, self.D + 1)[:,
+                                                                           1:]
+        return gt_depths.float()
+
+    @force_fp32()
+    def get_depth_loss(self, depth_labels, depth_preds):
+        depth_labels = self.get_downsampled_gt_depth(depth_labels)
+        depth_preds = depth_preds.permute(0, 2, 3,
+                                          1).contiguous().view(-1, self.D)
+        fg_mask = torch.max(depth_labels, dim=1).values > 0.0
+        depth_labels = depth_labels[fg_mask]
+        depth_preds = depth_preds[fg_mask]
+        with autocast(enabled=False):
+            depth_loss = F.binary_cross_entropy(
+                depth_preds,
+                depth_labels,
+                reduction='none',
+            ).sum() / max(1.0, fg_mask.sum())
+        return self.loss_depth_weight * depth_loss
+
+    def forward(self, input):
+        (x, rots, trans, intrins, post_rots, post_trans, bda,
+         mlp_input) = input[:8]
+
+        B, N, C, H, W = x.shape
+        x = x.view(B * N, C, H, W)
+        x = self.depth_net(x, mlp_input)
+        depth_digit = x[:, :self.D, ...]
+        tran_feat = x[:, self.D:self.D + self.out_channels, ...]
+        depth = depth_digit.softmax(dim=1)
+        return self.view_transform(input, depth, tran_feat)

@@ -3,7 +3,7 @@ import copy
 
 import torch
 from mmcv.cnn import ConvModule, build_conv_layer
-from mmcv.runner import BaseModule, force_fp32
+from mmcv.runner import BaseModule
 from torch import nn
 
 from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
@@ -11,7 +11,7 @@ from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
 from mmdet3d.core.post_processing import nms_bev
 from mmdet3d.models import builder
 from mmdet3d.models.utils import clip_sigmoid
-from mmdet.core import build_bbox_coder, multi_apply
+from mmdet.core import build_bbox_coder, multi_apply, reduce_mean
 from ..builder import HEADS, build_loss
 
 
@@ -289,7 +289,8 @@ class CenterHead(BaseModule):
                  norm_cfg=dict(type='BN2d'),
                  bias='auto',
                  norm_bbox=True,
-                 init_cfg=None):
+                 init_cfg=None,
+                 task_specific=True):
         assert init_cfg is None, 'To prevent abnormal initialization ' \
             'behavior, init_cfg is not allowed to be set'
         super(CenterHead, self).__init__(init_cfg=init_cfg)
@@ -328,6 +329,7 @@ class CenterHead(BaseModule):
             self.task_heads.append(builder.build_head(separate_head))
 
         self.with_velocity = 'vel' in common_heads.keys()
+        self.task_specific = task_specific
 
     def forward_single(self, x):
         """Forward function for CenterPoint.
@@ -582,7 +584,6 @@ class CenterHead(BaseModule):
             inds.append(ind)
         return heatmaps, anno_boxes, inds, masks
 
-    @force_fp32(apply_to=('preds_dicts'))
     def loss(self, gt_bboxes_3d, gt_labels_3d, preds_dicts, **kwargs):
         """Loss function for CenterHead.
 
@@ -598,44 +599,72 @@ class CenterHead(BaseModule):
         heatmaps, anno_boxes, inds, masks = self.get_targets(
             gt_bboxes_3d, gt_labels_3d)
         loss_dict = dict()
+        if not self.task_specific:
+            loss_dict['loss'] = 0
         for task_id, preds_dict in enumerate(preds_dicts):
             # heatmap focal loss
             preds_dict[0]['heatmap'] = clip_sigmoid(preds_dict[0]['heatmap'])
             num_pos = heatmaps[task_id].eq(1).float().sum().item()
+            cls_avg_factor = torch.clamp(
+                reduce_mean(heatmaps[task_id].new_tensor(num_pos)),
+                min=1).item()
             loss_heatmap = self.loss_cls(
                 preds_dict[0]['heatmap'],
                 heatmaps[task_id],
-                avg_factor=max(num_pos, 1))
+                avg_factor=cls_avg_factor)
             target_box = anno_boxes[task_id]
             # reconstruct the anno_box from multiple reg heads
-            if self.with_velocity:
-                preds_dict[0]['anno_box'] = torch.cat(
-                    (preds_dict[0]['reg'], preds_dict[0]['height'],
-                     preds_dict[0]['dim'], preds_dict[0]['rot'],
-                     preds_dict[0]['vel']),
-                    dim=1)
-            else:
-                preds_dict[0]['anno_box'] = torch.cat(
-                    (preds_dict[0]['reg'], preds_dict[0]['height'],
-                     preds_dict[0]['dim'], preds_dict[0]['rot']),
-                    dim=1)
+            preds_dict[0]['anno_box'] = torch.cat(
+                (
+                    preds_dict[0]['reg'],
+                    preds_dict[0]['height'],
+                    preds_dict[0]['dim'],
+                    preds_dict[0]['rot'],
+                    preds_dict[0]['vel'],
+                ),
+                dim=1,
+            )
 
             # Regression loss for dimension, offset, height, rotation
-            ind = inds[task_id]
             num = masks[task_id].float().sum()
+            ind = inds[task_id]
             pred = preds_dict[0]['anno_box'].permute(0, 2, 3, 1).contiguous()
             pred = pred.view(pred.size(0), -1, pred.size(3))
             pred = self._gather_feat(pred, ind)
             mask = masks[task_id].unsqueeze(2).expand_as(target_box).float()
+            num = torch.clamp(
+                reduce_mean(target_box.new_tensor(num)), min=1e-4).item()
             isnotnan = (~torch.isnan(target_box)).float()
             mask *= isnotnan
-
-            code_weights = self.train_cfg.get('code_weights', None)
+            code_weights = self.train_cfg['code_weights']
             bbox_weights = mask * mask.new_tensor(code_weights)
-            loss_bbox = self.loss_bbox(
-                pred, target_box, bbox_weights, avg_factor=(num + 1e-4))
-            loss_dict[f'task{task_id}.loss_heatmap'] = loss_heatmap
-            loss_dict[f'task{task_id}.loss_bbox'] = loss_bbox
+            if self.task_specific:
+                name_list = ['xy', 'z', 'whl', 'yaw', 'vel']
+                clip_index = [0, 2, 3, 6, 8, 10]
+                for reg_task_id in range(len(name_list)):
+                    pred_tmp = pred[
+                        ...,
+                        clip_index[reg_task_id]:clip_index[reg_task_id + 1]]
+                    target_box_tmp = target_box[
+                        ...,
+                        clip_index[reg_task_id]:clip_index[reg_task_id + 1]]
+                    bbox_weights_tmp = bbox_weights[
+                        ...,
+                        clip_index[reg_task_id]:clip_index[reg_task_id + 1]]
+                    loss_bbox_tmp = self.loss_bbox(
+                        pred_tmp,
+                        target_box_tmp,
+                        bbox_weights_tmp,
+                        avg_factor=(num + 1e-4))
+                    loss_dict[f'task{task_id}.loss_%s' %
+                              (name_list[reg_task_id])] = loss_bbox_tmp
+                loss_dict[f'task{task_id}.loss_heatmap'] = loss_heatmap
+            else:
+                loss_bbox = self.loss_bbox(
+                    pred, target_box, bbox_weights, avg_factor=num)
+                loss_dict['loss'] += loss_bbox
+                loss_dict['loss'] += loss_heatmap
+
         return loss_dict
 
     def get_bboxes(self, preds_dicts, img_metas, img=None, rescale=False):
@@ -678,11 +707,13 @@ class CenterHead(BaseModule):
                 batch_vel,
                 reg=batch_reg,
                 task_id=task_id)
-            assert self.test_cfg['nms_type'] in ['circle', 'rotate']
             batch_reg_preds = [box['bboxes'] for box in temp]
             batch_cls_preds = [box['scores'] for box in temp]
             batch_cls_labels = [box['labels'] for box in temp]
-            if self.test_cfg['nms_type'] == 'circle':
+            nms_type = self.test_cfg.get('nms_type')
+            if isinstance(nms_type, list):
+                nms_type = nms_type[task_id]
+            if nms_type == 'circle':
                 ret_task = []
                 for i in range(batch_size):
                     boxes3d = temp[i]['bboxes']
@@ -708,7 +739,8 @@ class CenterHead(BaseModule):
                 rets.append(
                     self.get_task_detections(num_class_with_bg,
                                              batch_cls_preds, batch_reg_preds,
-                                             batch_cls_labels, img_metas))
+                                             batch_cls_labels, img_metas,
+                                             task_id))
 
         # Merge branches results
         num_samples = len(rets[0])
@@ -733,7 +765,8 @@ class CenterHead(BaseModule):
         return ret_list
 
     def get_task_detections(self, num_class_with_bg, batch_cls_preds,
-                            batch_reg_preds, batch_cls_labels, img_metas):
+                            batch_reg_preds, batch_cls_labels, img_metas,
+                            task_id):
         """Rotate nms for each task.
 
         Args:
@@ -766,8 +799,17 @@ class CenterHead(BaseModule):
 
         for i, (box_preds, cls_preds, cls_labels) in enumerate(
                 zip(batch_reg_preds, batch_cls_preds, batch_cls_labels)):
+            default_val = [1.0 for _ in range(len(self.task_heads))]
+            factor = self.test_cfg.get('nms_rescale_factor',
+                                       default_val)[task_id]
+            if isinstance(factor, list):
+                for cid in range(len(factor)):
+                    box_preds[cls_labels == cid, 3:6] = \
+                        box_preds[cls_labels == cid, 3:6] * factor[cid]
+            else:
+                box_preds[:, 3:6] = box_preds[:, 3:6] * factor
 
-            # Apply NMS in bird eye view
+            # Apply NMS in birdeye view
 
             # get the highest score per prediction, then apply nms
             # to remove overlapped box.
@@ -797,15 +839,25 @@ class CenterHead(BaseModule):
                 boxes_for_nms = xywhr2xyxyr(img_metas[i]['box_type_3d'](
                     box_preds[:, :], self.bbox_coder.code_size).bev)
                 # the nms in 3d detection just remove overlap boxes.
-
+                if isinstance(self.test_cfg['nms_thr'], list):
+                    nms_thresh = self.test_cfg['nms_thr'][task_id]
+                else:
+                    nms_thresh = self.test_cfg['nms_thr']
                 selected = nms_bev(
                     boxes_for_nms,
                     top_scores,
-                    thresh=self.test_cfg['nms_thr'],
+                    thresh=nms_thresh,
                     pre_max_size=self.test_cfg['pre_max_size'],
                     post_max_size=self.test_cfg['post_max_size'])
             else:
                 selected = []
+
+            if isinstance(factor, list):
+                for cid in range(len(factor)):
+                    box_preds[top_labels == cid, 3:6] = \
+                        box_preds[top_labels == cid, 3:6] / factor[cid]
+            else:
+                box_preds[:, 3:6] = box_preds[:, 3:6] / factor
 
             # if selected is not None:
             selected_boxes = box_preds[selected]

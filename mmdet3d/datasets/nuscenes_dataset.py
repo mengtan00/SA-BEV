@@ -52,6 +52,16 @@ class NuScenesDataset(Custom3DDataset):
         use_valid_flag (bool, optional): Whether to use `use_valid_flag` key
             in the info file as mask to filter gt_boxes and gt_names.
             Defaults to False.
+        img_info_prototype (str, optional): Type of img information.
+            Based on 'img_info_prototype', the dataset will prepare the image
+            data info in the type of 'mmcv' for official image infos,
+            'bevdet' for BEVDet, and 'bevdet4d' for BEVDet4D.
+            Defaults to 'mmcv'.
+        multi_adj_frame_id_cfg (tuple[int]): Define the selected index of
+            reference adjcacent frames.
+        ego_cam (str): Specify the ego coordinate relative to a specified
+            camera by its name defined in NuScenes.
+            Defaults to None, which use the mean of all cameras.
     """
     NameMapping = {
         'movable_object.barrier': 'barrier',
@@ -125,7 +135,10 @@ class NuScenesDataset(Custom3DDataset):
                  filter_empty_gt=True,
                  test_mode=False,
                  eval_version='detection_cvpr_2019',
-                 use_valid_flag=False):
+                 use_valid_flag=False,
+                 img_info_prototype='mmcv',
+                 multi_adj_frame_id_cfg=None,
+                 ego_cam='CAM_FRONT'):
         self.load_interval = load_interval
         self.use_valid_flag = use_valid_flag
         super().__init__(
@@ -150,6 +163,10 @@ class NuScenesDataset(Custom3DDataset):
                 use_map=False,
                 use_external=False,
             )
+
+        self.img_info_prototype = img_info_prototype
+        self.multi_adj_frame_id_cfg = multi_adj_frame_id_cfg
+        self.ego_cam = ego_cam
 
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
@@ -218,36 +235,56 @@ class NuScenesDataset(Custom3DDataset):
             sweeps=info['sweeps'],
             timestamp=info['timestamp'] / 1e6,
         )
-
+        if 'ann_infos' in info:
+            input_dict['ann_infos'] = info['ann_infos']
         if self.modality['use_camera']:
-            image_paths = []
-            lidar2img_rts = []
-            for cam_type, cam_info in info['cams'].items():
-                image_paths.append(cam_info['data_path'])
-                # obtain lidar to image transformation matrix
-                lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
-                lidar2cam_t = cam_info[
-                    'sensor2lidar_translation'] @ lidar2cam_r.T
-                lidar2cam_rt = np.eye(4)
-                lidar2cam_rt[:3, :3] = lidar2cam_r.T
-                lidar2cam_rt[3, :3] = -lidar2cam_t
-                intrinsic = cam_info['cam_intrinsic']
-                viewpad = np.eye(4)
-                viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
-                lidar2img_rt = (viewpad @ lidar2cam_rt.T)
-                lidar2img_rts.append(lidar2img_rt)
+            if self.img_info_prototype == 'mmcv':
+                image_paths = []
+                lidar2img_rts = []
+                for cam_type, cam_info in info['cams'].items():
+                    image_paths.append(cam_info['data_path'])
+                    # obtain lidar to image transformation matrix
+                    lidar2cam_r = np.linalg.inv(
+                        cam_info['sensor2lidar_rotation'])
+                    lidar2cam_t = cam_info[
+                        'sensor2lidar_translation'] @ lidar2cam_r.T
+                    lidar2cam_rt = np.eye(4)
+                    lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                    lidar2cam_rt[3, :3] = -lidar2cam_t
+                    intrinsic = cam_info['cam_intrinsic']
+                    viewpad = np.eye(4)
+                    viewpad[:intrinsic.shape[0], :intrinsic.
+                            shape[1]] = intrinsic
+                    lidar2img_rt = (viewpad @ lidar2cam_rt.T)
+                    lidar2img_rts.append(lidar2img_rt)
 
-            input_dict.update(
-                dict(
-                    img_filename=image_paths,
-                    lidar2img=lidar2img_rts,
-                ))
+                input_dict.update(
+                    dict(
+                        img_filename=image_paths,
+                        lidar2img=lidar2img_rts,
+                    ))
 
-        if not self.test_mode:
-            annos = self.get_ann_info(index)
-            input_dict['ann_info'] = annos
-
+                if not self.test_mode:
+                    annos = self.get_ann_info(index)
+                    input_dict['ann_info'] = annos
+            else:
+                assert 'bevdet' in self.img_info_prototype
+                input_dict.update(dict(curr=info))
+                if '4d' in self.img_info_prototype:
+                    info_adj_list = self.get_adj_info(info, index)
+                    input_dict.update(dict(adjacent=info_adj_list))
         return input_dict
+
+    def get_adj_info(self, info, index):
+        info_adj_list = []
+        for select_id in range(*self.multi_adj_frame_id_cfg):
+            select_id = max(index - select_id, 0)
+            if not self.data_infos[select_id]['scene_token'] == info[
+                    'scene_token']:
+                info_adj_list.append(info)
+            else:
+                info_adj_list.append(self.data_infos[select_id])
+        return info_adj_list
 
     def get_ann_info(self, index):
         """Get annotation info according to the given index.
@@ -315,16 +352,30 @@ class NuScenesDataset(Custom3DDataset):
 
         print('Start to convert detection format...')
         for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
-            annos = []
-            boxes = output_to_nusc_box(det, self.with_velocity)
+            boxes = det['boxes_3d'].tensor.numpy()
+            scores = det['scores_3d'].numpy()
+            labels = det['labels_3d'].numpy()
             sample_token = self.data_infos[sample_id]['token']
-            boxes = lidar_nusc_box_to_global(self.data_infos[sample_id], boxes,
-                                             mapped_class_names,
-                                             self.eval_detection_configs,
-                                             self.eval_version)
+
+            trans = self.data_infos[sample_id]['cams'][
+                self.ego_cam]['ego2global_translation']
+            rot = self.data_infos[sample_id]['cams'][
+                self.ego_cam]['ego2global_rotation']
+            rot = pyquaternion.Quaternion(rot)
+            annos = list()
             for i, box in enumerate(boxes):
-                name = mapped_class_names[box.label]
-                if np.sqrt(box.velocity[0]**2 + box.velocity[1]**2) > 0.2:
+                name = mapped_class_names[labels[i]]
+                center = box[:3]
+                wlh = box[[4, 3, 5]]
+                box_yaw = box[6]
+                box_vel = box[7:].tolist()
+                box_vel.append(0)
+                quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw)
+                nusc_box = NuScenesBox(center, wlh, quat, velocity=box_vel)
+                nusc_box.rotate(rot)
+                nusc_box.translate(trans)
+                if np.sqrt(nusc_box.velocity[0]**2 +
+                           nusc_box.velocity[1]**2) > 0.2:
                     if name in [
                             'car',
                             'construction_vehicle',
@@ -336,26 +387,30 @@ class NuScenesDataset(Custom3DDataset):
                     elif name in ['bicycle', 'motorcycle']:
                         attr = 'cycle.with_rider'
                     else:
-                        attr = NuScenesDataset.DefaultAttribute[name]
+                        attr = self.DefaultAttribute[name]
                 else:
                     if name in ['pedestrian']:
                         attr = 'pedestrian.standing'
                     elif name in ['bus']:
                         attr = 'vehicle.stopped'
                     else:
-                        attr = NuScenesDataset.DefaultAttribute[name]
-
+                        attr = self.DefaultAttribute[name]
                 nusc_anno = dict(
                     sample_token=sample_token,
-                    translation=box.center.tolist(),
-                    size=box.wlh.tolist(),
-                    rotation=box.orientation.elements.tolist(),
-                    velocity=box.velocity[:2].tolist(),
+                    translation=nusc_box.center.tolist(),
+                    size=nusc_box.wlh.tolist(),
+                    rotation=nusc_box.orientation.elements.tolist(),
+                    velocity=nusc_box.velocity[:2],
                     detection_name=name,
-                    detection_score=box.score,
-                    attribute_name=attr)
+                    detection_score=float(scores[i]),
+                    attribute_name=attr,
+                )
                 annos.append(nusc_anno)
-            nusc_annos[sample_token] = annos
+            # other views results of the same frame should be concatenated
+            if sample_token in nusc_annos:
+                nusc_annos[sample_token].extend(annos)
+            else:
+                nusc_annos[sample_token] = annos
         nusc_submissions = {
             'meta': self.modality,
             'results': nusc_annos,

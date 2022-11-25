@@ -16,7 +16,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MMDet benchmark a model')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
-    parser.add_argument('--samples', default=2000, help='samples to benchmark')
+    parser.add_argument('--samples', default=400, help='samples to benchmark')
     parser.add_argument(
         '--log-interval', default=50, help='interval of logging')
     parser.add_argument(
@@ -53,9 +53,10 @@ def main():
         shuffle=False)
 
     # build the model and load checkpoint
+    cfg.model.train_cfg = None
+    cfg.model.align_after_view_transfromation=True
     if not args.no_acceleration:
         cfg.model.img_view_transformer.accelerate=True
-    cfg.model.train_cfg = None
     model = build_detector(cfg.model, test_cfg=cfg.get('test_cfg'))
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
@@ -74,12 +75,22 @@ def main():
 
     # benchmark with several samples and take the average
     for i, data in enumerate(data_loader):
+        inputs = [d.cuda() for d in data['img_inputs'][0]]
+        with torch.no_grad():
+            feat_prev, inputs = model.module.extract_img_feat(
+                inputs, pred_prev=True, img_metas=None)
+        data['img_inputs'][0] = inputs
 
         torch.cuda.synchronize()
         start_time = time.perf_counter()
 
         with torch.no_grad():
-            model(return_loss=False, rescale=True, **data)
+            model(
+                return_loss=False,
+                rescale=True,
+                sequential=True,
+                feat_prev=feat_prev,
+                **data)
 
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - start_time

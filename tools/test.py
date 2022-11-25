@@ -76,6 +76,10 @@ def parse_args():
         action='store_true',
         help='whether to use gpu to collect results.')
     parser.add_argument(
+        '--no-aavt',
+        action='store_true',
+        help='Do not align after view transformer.')
+    parser.add_argument(
         '--tmpdir',
         help='tmp directory used for collecting results from multiple '
         'workers, available when gpu-collect is not specified')
@@ -204,6 +208,9 @@ def main():
     data_loader = build_dataloader(dataset, **test_loader_cfg)
 
     # build the model and load checkpoint
+    if not args.no_aavt:
+        if '4D' in cfg.model.type:
+            cfg.model.align_after_view_transfromation=True
     cfg.model.train_cfg = None
     model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
     fp16_cfg = cfg.get('fp16', None)
