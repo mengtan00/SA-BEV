@@ -13,7 +13,7 @@
 4. use the long term temporal fusion as SOLOFusion.
 5. train models without CBGS by default.
 6. use key frame for temporal fusion.
-
+7. Technique Report [BEVPoolv2](https://arxiv.org/abs/2211.17111) in English and [Blog](https://zhuanlan.zhihu.com/p/586637783) in Chinese.
 * [History](./docs/en/news.md)
 
 
@@ -49,7 +49,7 @@ python tools/analysis_tools/benchmark.py $config $checkpoint
 # 4D with pre-computation acceleration
 python tools/analysis_tools/benchmark_sequential.py $config $checkpoint
 # view transformer only
-python tools/analysis_tools/benchmark.py $config $checkpoint
+python tools/analysis_tools/benchmark_view_transformer.py $config $checkpoint
 ```
 
 #### Estimate the flops of BEVDet
@@ -93,6 +93,13 @@ Beside, there are some other attractive works extend the boundary of BEVDet.
 ## Bibtex
 If this work is helpful for your research, please consider citing the following BibTeX entry.
 ```
+@article{huang2022bevpoolv2,
+  title={BEVPoolv2: A Cutting-edge Implementation of BEVDet Toward Deployment},
+  author={Huang, Junjie and Huang, Guan},
+  journal={arXiv preprint arXiv:2211.17111},
+  year={2022}
+}
+
 @article{huang2022bevdet4d,
   title={BEVDet4D: Exploit Temporal Cues in Multi-camera 3D Object Detection},
   author={Huang, Junjie and Huang, Guan},
