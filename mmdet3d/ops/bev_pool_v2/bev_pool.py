@@ -9,7 +9,10 @@ __all__ = ['bev_pool_v2', 'TRTBEVPoolv2']
 
 
 class QuickCumsumCuda(torch.autograd.Function):
+    r"""BEVPoolv2 implementation for Lift-Splat-Shoot view transformation.
 
+    Please refer to the `paper <https://arxiv.org/abs/2211.17111>`_
+    """
     @staticmethod
     def forward(ctx, depth, feat, ranks_depth, ranks_feat, ranks_bev,
                 bev_feat_shape, interval_starts, interval_lengths):

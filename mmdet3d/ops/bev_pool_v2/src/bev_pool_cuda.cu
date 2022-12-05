@@ -1,3 +1,6 @@
+// Copyright (c) Phigent Robotics. All rights reserved.
+// Reference https://arxiv.org/abs/2211.17111
+
 #include <stdio.h>
 #include <stdlib.h>
 

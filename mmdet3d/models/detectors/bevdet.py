@@ -11,6 +11,16 @@ from .centerpoint import CenterPoint
 
 @DETECTORS.register_module()
 class BEVDet(CenterPoint):
+    r"""BEVDet paradigm for multi-camera 3D object detection.
+
+    Please refer to the `paper <https://arxiv.org/abs/2112.11790>`_
+
+    Args:
+        img_view_transformer (dict): Configuration dict of view transformer.
+        img_bev_encoder_backbone (dict): Configuration dict of the BEV encoder
+            backbone.
+        img_bev_encoder_neck (dict): Configuration dict of the BEV encoder neck.
+    """
 
     def __init__(self, img_view_transformer, img_bev_encoder_backbone,
                  img_bev_encoder_neck, **kwargs):
@@ -221,7 +231,19 @@ class BEVDetTRT(BEVDet):
 
 @DETECTORS.register_module()
 class BEVDet4D(BEVDet):
+    r"""BEVDet4D paradigm for multi-camera 3D object detection.
 
+    Please refer to the `paper <https://arxiv.org/abs/2203.17054>`_
+
+    Args:
+        pre_process (dict | None): Configuration dict of BEV pre-process net.
+        align_after_view_transfromation (bool): Whether to align the BEV
+            Feature after view transformation. By default, the BEV feature of
+            the previous frame is aligned during the view transformation.
+        num_adj (int): Number of adjacent frames.
+        with_prev (bool): Whether to set the BEV feature of previous frame as
+            all zero. By default, False.
+    """
     def __init__(self,
                  pre_process=None,
                  align_after_view_transfromation=False,

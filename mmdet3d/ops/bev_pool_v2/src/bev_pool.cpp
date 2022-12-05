@@ -1,3 +1,5 @@
+// Copyright (c) Phigent Robotics. All rights reserved.
+// Reference https://arxiv.org/abs/2211.17111
 #include <torch/torch.h>
 #include <c10/cuda/CUDAGuard.h>
 

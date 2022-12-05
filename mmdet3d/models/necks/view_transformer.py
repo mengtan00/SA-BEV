@@ -14,9 +14,10 @@ from ..builder import NECKS
 
 @NECKS.register_module()
 class LSSViewTransformer(BaseModule):
-    r"""Lift-Splat-Shoot view transformer.
+    r"""Lift-Splat-Shoot view transformer with BEVPoolv2 implementation.
 
-    Please refer to the `paper <https://arxiv.org/abs/2008.05711>`_
+    Please refer to the `paper <https://arxiv.org/abs/2008.05711>`_ and
+        `paper <https://arxiv.org/abs/2211.17111>`
 
     Args:
         grid_config (dict): Config of grid alone each axis in format of
