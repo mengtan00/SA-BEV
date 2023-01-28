@@ -21,13 +21,16 @@
 
 ## Main Results
 
-| Config                                                                    | mAP        | NDS        | FPS  | Model                                                                                          | Log                                                                                            |
-| ------------------------------------------------------------------------- | ---------- | ---------- | ---- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [**BEVDet-R50**](configs/bevdet/bevdet-r50.py)                            | 27.8       | 32.2       | 18.7 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
-| [**BEVDet-R50-CBGS**](configs/bevdet/bevdet-r50-cbgs.py)                  | 30.7       | 38.2       | 18.7 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
-| [**BEVDet-R50-4D-Depth-CBGS**](configs/bevdet/bevdet4d-r50-depth-cbgs.py) | 40.2/40.6# | 52.3/52.6# | 16.4 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
+| Config                                                                    | mAP        | NDS        | Latency(ms) | FPS  | Model                                                                                          | Log                                                                                            |
+| ------------------------------------------------------------------------- | ---------- | ---------- | ---- | ---- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [**BEVDet-R50**](configs/bevdet/bevdet-r50.py)                            | 27.8       | 32.2       | 37.0/15.9/52.9| 18.9 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
+| [**BEVDet-R50-CBGS**](configs/bevdet/bevdet-r50-cbgs.py)                  | 30.7       | 38.2       |37.0/15.0/52.0 |19.2 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
+| [**BEVDet-R50-4D-CBGS**](configs/bevdet/bevdet4d-r50-cbgs.py) | 34.9# | 48.4# | 35.8/15.2/51.0|19.6 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
+| [**BEVDet-R50-4D-Depth-CBGS**](configs/bevdet/bevdet4d-r50-depth-cbgs.py) | 40.2/40.6# | 52.3/52.6# |46.0/14.2/60.2 |16.6 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
 
 \# align previous frame bev feature during the view transformation.
+
+The latency includes Network/Post-Processing/Total.
 
 ## Inference speed with different backends
 
@@ -55,9 +58,9 @@ python tools/create_data_bevdet.py
 
 ```shell
 # with pre-computation acceleration
-python tools/analysis_tools/benchmark.py $config $checkpoint
+python tools/analysis_tools/benchmark.py $config $checkpoint --fuse-conv-bn
 # 4D with pre-computation acceleration
-python tools/analysis_tools/benchmark_sequential.py $config $checkpoint
+python tools/analysis_tools/benchmark_sequential.py $config $checkpoint --fuse-conv-bn
 # view transformer only
 python tools/analysis_tools/benchmark_view_transformer.py $config $checkpoint
 ```
