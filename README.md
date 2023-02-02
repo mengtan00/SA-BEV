@@ -4,7 +4,7 @@
 
 ## News
 
-- **2022.01.12** Support TensorRT-INT8.
+- **2023.01.12** Support TensorRT-INT8.
 - **2022.11.24** A new branch of bevdet codebase, dubbed dev2.0, is released. dev2.0 includes the following features:
 
 1. support **BEVPoolv2**, whose inference speed is up to **15.1 times** the previous fastest implementation of Lift-Splat-Shoot view transformer. It is also far less memory consumption.
