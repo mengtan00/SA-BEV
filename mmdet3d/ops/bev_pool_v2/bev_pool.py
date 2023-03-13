@@ -120,8 +120,8 @@ class TRTBEVPoolv2(torch.autograd.Function):
 
     @staticmethod
     def forward(g,
-                depth,
-                feat,
+                depth,  # N,D,H,W
+                feat,  # N,H,W,C
                 ranks_depth,
                 ranks_feat,
                 ranks_bev,
@@ -130,10 +130,8 @@ class TRTBEVPoolv2(torch.autograd.Function):
                 out_height=128,
                 out_width=128):
         """run forward."""
-        n, d, h, w = depth.shape
-        feat = feat.view(1, n, feat.shape[3], h, w)
-        feat = feat.permute(0, 1, 3, 4, 2)
-        depth = depth.view(1, n, d, h, w)
+        feat = feat.unsqueeze(0)
+        depth = depth.unsqueeze(0)
         bev_feat_shape = (depth.shape[0], 1, out_height, out_width,
                           feat.shape[-1])  # (B, Z, Y, X, C)
         bev_feat = bev_pool_v2(depth, feat, ranks_depth, ranks_feat, ranks_bev,
