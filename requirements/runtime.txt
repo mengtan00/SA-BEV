@@ -6,5 +6,6 @@ nuscenes-devkit
 plyfile
 scikit-image
 # by default we also use tensorboard to log results
-tensorboard
+tensorboard==2.9.1
+setuptools==58.0.4
 trimesh>=2.35.39,<2.35.40

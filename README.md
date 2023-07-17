@@ -1,134 +1,50 @@
-# BEVDet
+<div align="center">
+<h1>SA-BEV</h1>
+<h3>[ICCV2023] SA-BEV: Generating Semantic-Aware Bird's-Eye-View Feature for Multi-view 3D Object Detection</h3>
+</div>
 
-![Illustrating the performance of the proposed BEVDet on the nuScenes val set](./resources/nds-fps.png)
+
+
+<div align="center">
+  <img src="resources/sabev.png" width="800"/>
+</div><br/>
 
 ## News
 
-- **2023.01.12** Support TensorRT-INT8.
-- **2022.11.24** A new branch of bevdet codebase, dubbed dev2.0, is released. dev2.0 includes the following features:
-
-1. support **BEVPoolv2**, whose inference speed is up to **15.1 times** the previous fastest implementation of Lift-Splat-Shoot view transformer. It is also far less memory consumption.
-   ![bevpoolv2](./resources/bevpoolv2.png)
-   ![bevpoolv2](./resources/bevpoolv2_performance.png)
-2. use the origin of ego coordinate system as the center of the receptive field instead of the Lidar's.
-3. **support conversion of BEVDet from pytorch to TensorRT.**
-4. use the long term temporal fusion as SOLOFusion.
-5. train models without CBGS by default.
-6. use key frame for temporal fusion.
-7. Technique Report [BEVPoolv2](https://arxiv.org/abs/2211.17111) in English and [Blog](https://zhuanlan.zhihu.com/p/586637783) in Chinese.
-
-- [History](./docs/en/news.md)
+- **2023.07.14** SA-BEV is accepted by ICCV 2023.
 
 ## Main Results
 
-| Config                                                                    | mAP        | NDS        | Latency(ms) | FPS  | Model                                                                                          | Log                                                                                            |
-| ------------------------------------------------------------------------- | ---------- | ---------- | ---- | ---- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [**BEVDet-R50**](configs/bevdet/bevdet-r50.py)                            | 27.8       | 32.2       | 37.0/15.9/52.9| 18.9 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
-| [**BEVDet-R50-CBGS**](configs/bevdet/bevdet-r50-cbgs.py)                  | 30.7       | 38.2       |37.0/15.0/52.0 |19.2 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
-| [**BEVDet-R50-4D-CBGS**](configs/bevdet/bevdet4d-r50-cbgs.py) | 34.9/35.4# | 48.4/48.6# | 35.8/15.2/51.0|19.6 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
-| [**BEVDet-R50-4D-Depth-CBGS**](configs/bevdet/bevdet4d-r50-depth-cbgs.py) | 40.2/40.6# | 52.3/52.6# |46.0/14.2/60.2 |16.6 | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) | [google](https://drive.google.com/drive/folders/1Dh2FbEChbfhIaBHimPP4jbibs8XjJ5rx?usp=sharing) |
-
-\# align previous frame bev feature during the view transformation.
-
+| Config                                                                    | mAP        | NDS        | 
+| ------------------------------------------------------------------------- | ---------- | ---------- |
+| [**SA-BEV-R50**](configs/sabev/sabev-r50.py)                            | 35.5       | 46.7       | 
+| [**SA-BEV-R50-MSCT**](configs/sabev/sabev-r50-msct.py)                  | 37.0       | 48.8       |
+| [**SA-BEV-R50-MSCT-CBGS**](configs/sabev/sabev-r50-msct-cbgs.py)        | 38.7       | 51.2       | 
 The latency includes Network/Post-Processing/Total.
 
-## Inference speed with different backends
-
-| Backend       | 256x704 | 384x1056 | 512x1408 | 640x1760 |
-| ------------- | ------- | -------- | -------- | -------- |
-| PyTorch       | 37.9    | 64.7     | 105.7    | 154.2    |
-| TensorRT      | 18.4    | 25.9     | 40.0     | 58.3     |
-| TensorRT-FP16 | 7.2     | 10.6     | 15.3     | 21.2     |
-| TensorRT-INT8 | 4.4     | 5.8      | 8.2      | 11.0     |
-
-- Evaluate with [**BEVDet-R50**](configs/bevdet/bevdet-r50.py) on a RTX 3090 GPU. We omit the postprocessing, which runs about 14.3 ms with the PyTorch backend.
 
 ## Get Started
 
 #### Installation and Data Preparation
 
-1. Please refer to [getting_started.md](docs/en/getting_started.md) for installing BEVDet as mmdetection3d. [Docker](docker/Dockerfile) is recommended for environment preparation.
-2. Prepare nuScenes dataset as introduced in [nuscenes_det.md](docs/en/datasets/nuscenes_det.md) and create the pkl for BEVDet by running:
+1. Please refer to [getting_started.md](docs/en/getting_started.md) for installing BEVDet as mmdetection3d. 
+2. Prepare nuScenes dataset as introduced in [nuscenes_det.md](docs/en/datasets/nuscenes_det.md) and create the pkl for SA-BEV by running:
 
 ```shell
 python tools/create_data_bevdet.py
-```
-
-#### Estimate the inference speed of BEVDet
-
-```shell
-# with pre-computation acceleration
-python tools/analysis_tools/benchmark.py $config $checkpoint --fuse-conv-bn
-# 4D with pre-computation acceleration
-python tools/analysis_tools/benchmark_sequential.py $config $checkpoint --fuse-conv-bn
-# view transformer only
-python tools/analysis_tools/benchmark_view_transformer.py $config $checkpoint
-```
-
-#### Estimate the flops of BEVDet
-
-```shell
-python tools/analysis_tools/get_flops.py configs/bevdet/bevdet-r50.py --shape 256 704
-```
-
-#### Visualize the predicted result.
-
-- Private implementation. (Visualization remotely/locally)
-
-```shell
-python tools/test.py $config $checkpoint --format-only --eval-options jsonfile_prefix=$savepath
-python tools/analysis_tools/vis.py $savepath/pts_bbox/results_nusc.json
-```
-
-#### Convert to TensorRT and test inference speed.
-
-```shell
-1. install mmdeploy from https://github.com/HuangJunJie2017/mmdeploy
-2. convert to TensorRT
-python tools/convert_bevdet_to_TRT.py $config $checkpoint $work_dir --fuse-conv-bn --fp16 --int8
-3. test inference speed
-python tools/analysis_tools/benchmark_trt.py $config $engine
 ```
 
 ## Acknowledgement
 
 This project is not possible without multiple great open-sourced code bases. We list some notable examples below.
 
+- [BEVDet](https://github.com/HuangJunJie2017/BEVDet)
+- [BEVDepth](https://github.com/Megvii-BaseDetection/BEVDepth)
 - [open-mmlab](https://github.com/open-mmlab)
 - [CenterPoint](https://github.com/tianweiy/CenterPoint)
 - [Lift-Splat-Shoot](https://github.com/nv-tlabs/lift-splat-shoot)
-- [Swin Transformer](https://github.com/microsoft/Swin-Transformer)
-- [BEVFusion](https://github.com/mit-han-lab/bevfusion)
-- [BEVDepth](https://github.com/Megvii-BaseDetection/BEVDepth)
-
-Beside, there are some other attractive works extend the boundary of BEVDet.
-
-- [BEVerse](https://github.com/zhangyp15/BEVerse)  for multi-task learning.
-- [BEVStereo](https://github.com/Megvii-BaseDetection/BEVStereo)  for stero depth estimation.
 
 ## Bibtex
 
-If this work is helpful for your research, please consider citing the following BibTeX entry.
+If SA-BEV is helpful for your research, please consider citing the following BibTeX entry.
 
-```
-@article{huang2022bevpoolv2,
-  title={BEVPoolv2: A Cutting-edge Implementation of BEVDet Toward Deployment},
-  author={Huang, Junjie and Huang, Guan},
-  journal={arXiv preprint arXiv:2211.17111},
-  year={2022}
-}
-
-@article{huang2022bevdet4d,
-  title={BEVDet4D: Exploit Temporal Cues in Multi-camera 3D Object Detection},
-  author={Huang, Junjie and Huang, Guan},
-  journal={arXiv preprint arXiv:2203.17054},
-  year={2022}
-}
-
-@article{huang2021bevdet,
-  title={BEVDet: High-performance Multi-camera 3D Object Detection in Bird-Eye-View},
-  author={Huang, Junjie and Huang, Guan and Zhu, Zheng and Yun, Ye and Du, Dalong},
-  journal={arXiv preprint arXiv:2112.11790},
-  year={2021}
-}
-```
