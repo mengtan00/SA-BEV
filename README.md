@@ -51,7 +51,12 @@ pip install -e .
 python tools/create_data_bevdet.py
 ```
 
-#### 3. Train and evalutate model following:
+#### 3. Create depth and semantic label from point cloud.
+```shell
+python tools/generate_point_label.py
+```
+
+#### 4. Train and evalutate model following:
 ```shell
 bash tools/dist_train.sh configs/sabev/sabev-r50.py 8 --no-validate
 bash tools/dist_test.sh configs/sabev/sabev-r50.py work_dirs/sabev-r50/epoch_24_ema.pth 8 --eval bbox
