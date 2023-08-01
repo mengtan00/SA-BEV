@@ -15,11 +15,11 @@
 
 ## Main Results
 
-| Config                                                          | mAP   | NDS  | Model | Log |
-| --------------------------------------------------------------- | ----- | ---- | ----- | --- |
-| [**SA-BEV-R50**](configs/sabev/sabev-r50.py)                    | 35.5  | 46.7 | [baidu](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) | [baidu](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) |
-| [**SA-BEV-R50-MSCT**](configs/sabev/sabev-r50-msct.py)          | 37.0  | 48.8 | [baidu](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) | [baidu](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) |
-| [**SA-BEV-R50-MSCT-CBGS**](configs/sabev/sabev-r50-msct-cbgs.py)| 38.7  | 51.2 | [baidu](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) | [baidu](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) |
+| Config                                                          | mAP   | NDS  | Baidu | Google |
+| --------------------------------------------------------------- | :----: | :----: | :-----: | :---: |
+| [**SA-BEV-R50**](configs/sabev/sabev-r50.py)                    | 35.5  | 46.7 | [link](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) | [link](https://drive.google.com/drive/folders/1-scWXNni3xkPibv7CApS--a5JSDmujUu?usp=sharing) |
+| [**SA-BEV-R50-MSCT**](configs/sabev/sabev-r50-msct.py)          | 37.0  | 48.8 | [link](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) | [link](https://drive.google.com/drive/folders/1-scWXNni3xkPibv7CApS--a5JSDmujUu?usp=sharing) |
+| [**SA-BEV-R50-MSCT-CBGS**](configs/sabev/sabev-r50-msct-cbgs.py)| 38.7  | 51.2 | [link](https://pan.baidu.com/s/1ue-Rr2rNU-s1DUs2jqpxcQ?pwd=oo8x) | [link](https://drive.google.com/drive/folders/1-scWXNni3xkPibv7CApS--a5JSDmujUu?usp=sharing) |
 
 
 ## Get Started
