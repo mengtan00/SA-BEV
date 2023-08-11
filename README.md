@@ -51,7 +51,7 @@ pip install -e .
 python tools/create_data_bevdet.py
 ```
 
-#### 3. Create depth and semantic label from point cloud.
+#### 3. Download nuScenes-lidarseg from nuScenes official site and put it under data/nuscenes/. Create depth and semantic labels from point cloud by running:
 ```shell
 python tools/generate_point_label.py
 ```
